@@ -32,7 +32,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - { sys: vcvars64, env: x86_64, runner: windows-latest }
           - { sys: vcvars32, env: i686, runner: windows-latest }
           - { sys: vcvarsarm64, env: arm64, runner: windows-11-arm }
     runs-on: ${{ matrix.runner }}
@@ -97,3 +96,130 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: libcurl-impersonate-${{ github.head_ref || github.ref_name }}.${{ matrix.env }}-win32.tar.gz
+
+  build-windows-mingw:
+    name: Build windows mingw-w64 binaries
+    runs-on: ubuntu-latest
+    container: mstorsjo/llvm-mingw:20250514
+    env:
+      ARCH: x86_64-w64-mingw32
+      CC: /opt/llvm-mingw/bin/x86_64-w64-mingw32-clang
+      CXX: /opt/llvm-mingw/bin/x86_64-w64-mingw32-clang++
+      LD: /opt/llvm-mingw/bin/x86_64-w64-mingw32-ld
+      STRIP: /opt/llvm-mingw/bin/x86_64-w64-mingw32-strip
+      LIBS: "-lc++ -lc++abi -lunwind -lwinpthread -lws2_32"
+      CFLAGS: "-O3"
+      CPPFLAGS: "-I/opt/llvm-mingw/generic-w64-mingw32/include -I/opt/llvm-mingw/x86_64-w64-mingw32/include"
+      CXXFLAGS: "-D_UCRT -std=c++20 -static"
+      LDFLAGS: "-Wl,-lucrt -L/opt/llvm-mingw/x86_64-w64-mingw32/lib --ld-path=/opt/llvm-mingw/bin/x86_64-w64-mingw32-ld -static"
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v2
+
+      - name: Install Windows cross-build dependencies
+        run: |
+          apt-get update
+          apt-get -y install golang-go automake cmake autoconf libtool pkg-config curl wget git jq xz-utils grep sed groff gnupg libcunit1-dev libgpg-error-dev mingw-w64-tools nasm
+
+      - name: Cache BoringSSL source
+        uses: actions/cache@v4
+        with:
+          path: boringssl.zip
+          key: ${{ runner.os }}-${{ env.ARCH }}-boring-source-${{ env.BORINGSSL_COMMIT }}
+
+      - name: Cache BoringSSL build
+        id: cache-boringssl
+        uses: actions/cache@v4
+        with:
+          path: boringssl/build
+          key: ${{ runner.os }}-${{ env.ARCH }}-boring-build-v2-${{ env.BORINGSSL_COMMIT }}-${{ hashFiles('patches/boringssl.patch', 'Makefile.in', '.github/workflows/build-win.yaml') }}
+
+      - name: Post BoringSSL cache restore
+        if: ${{ steps.cache-boringssl.outputs.cache-hit != false }}
+        run: |
+          touch boringssl.zip
+          touch boringssl/.patched
+          find boringssl/build -type f | xargs touch
+
+      - name: Configure static MinGW build
+        run: |
+          set -e
+          mkdir -p "${{ runner.temp }}/install"
+          ./configure --prefix=${{ runner.temp }}/install --enable-static \
+                      --host=${{ env.ARCH }} \
+                      --with-ca-path=/etc/ssl/certs \
+                      --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt
+
+      - name: Build static MinGW binaries
+        run: |
+          set -e
+          make build
+          make checkbuild
+          make install-strip
+
+      - name: Merge static libraries into libcurl-impersonate.a
+        run: |
+          set -e
+          cp zlib-*/installed/lib/lib*.a "${{ runner.temp }}/install/lib"
+          cp zstd-*/installed/lib/lib*.a "${{ runner.temp }}/install/lib"
+          cp nghttp2*/installed/lib/lib*.a "${{ runner.temp }}/install/lib"
+          cp nghttp3*/installed/lib/lib*.a "${{ runner.temp }}/install/lib"
+          cp ngtcp2*/installed/lib/lib*.a "${{ runner.temp }}/install/lib"
+          cp brotli*/out/installed/lib/lib*.a "${{ runner.temp }}/install/lib"
+          cp boringssl*/lib/lib*.a "${{ runner.temp }}/install/lib"
+
+          cd "${{ runner.temp }}/install/lib"
+          mv libcurl-impersonate.a libcurl-impersonate.orig.a
+          lib_list="libcurl-impersonate.orig.a libz.a libzstd.a libbrotlidec.a libbrotlicommon.a libbrotlienc.a libnghttp2.a libnghttp3.a libngtcp2.a libngtcp2_crypto_boringssl.a libssl.a libcrypto.a"
+          rm -rf merge && mkdir merge
+          for lib in $lib_list; do
+            lib_base="${lib%.a}"
+            mkdir -p "merge/$lib_base"
+            cd "merge/$lib_base"
+            /opt/llvm-mingw/bin/llvm-ar x "../../$lib"
+            cd ../..
+          done
+          /opt/llvm-mingw/bin/llvm-ar rcs libcurl-impersonate.a merge/*/*
+          rm -rf merge libcurl-impersonate.orig.a
+
+      - name: Upload MinGW configure logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mingw-config-logs
+          path: |
+            curl-8_15_0/config.log
+            curl-8_15_0/config.status
+            ngtcp2-*/config.log
+            ngtcp2-*/config.status
+          if-no-files-found: warn
+
+      - name: Build tag tarball
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tar cvzf libcurl-impersonate-${{ github.ref_name }}.x86_64-win32.tar.gz -C "${{ runner.temp }}/install" .
+
+      - name: Build branch tarball
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          tar cvzf libcurl-impersonate.x86_64-win32.tar.gz -C "${{ runner.temp }}/install" .
+
+      - name: Upload tag artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcurl-impersonate.x86_64-win32.tar.gz
+          path: ./libcurl-impersonate-${{ github.ref_name }}.x86_64-win32.tar.gz
+
+      - name: Upload branch artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcurl-impersonate.x86_64-win32.tar.gz
+          path: ./libcurl-impersonate.x86_64-win32.tar.gz
+
+      - name: Upload release files
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: libcurl-impersonate-${{ github.ref_name }}.x86_64-win32.tar.gz

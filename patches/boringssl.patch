@@ -1496,3 +1496,32 @@ index 48a156091..23721f9c7 100644
    if (CRYPTO_is_BMI1_capable() && CRYPTO_is_BMI2_capable() &&
      CRYPTO_is_ADX_capable()) {
        fiat_p256_adx_sqr(out1, arg1);
+diff --git a/ssl/ssl_file.cc b/ssl/ssl_file.cc
+index 783cc7616..4302723dc 100644
+--- a/ssl/ssl_file.cc
++++ b/ssl/ssl_file.cc
+@@ -22,6 +22,10 @@
+ #include <openssl/x509.h>
+ 
+ #include "internal.h"
++
++#if defined(OPENSSL_WINDOWS) && defined(X509_NAME)
++#undef X509_NAME
++#endif
+ 
+ 
+ static int xname_cmp(const X509_NAME *const *a, const X509_NAME *const *b) {
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index 2bfc4f0eb..5579af0ba 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -24,6 +24,10 @@
+ #include "../crypto/internal.h"
+ #include "internal.h"
+ 
++#if defined(OPENSSL_WINDOWS) && defined(X509_NAME)
++#undef X509_NAME
++#endif
++
+ 
+ BSSL_NAMESPACE_BEGIN
