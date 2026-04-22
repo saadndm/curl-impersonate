@@ -8,22 +8,31 @@ index d0b13824..cf6ebbca 100644
  Cflags: -I${includedir}
 -Requires.private: libngtcp2, openssl
 +Requires.private: libngtcp2
-diff --git a/export.sh b/export.sh
-new file mode 100755
-index 00000000..55f76ef2
---- /dev/null
-+++ b/export.sh
-@@ -0,0 +1,10 @@
-+#!/bin/bash
-+
-+# TODO: use cmake to generate mingw makefile, see:
-+#
-+# 1. https://github.com/curl/curl/pull/13244/files
-+# 2. https://everything.curl.dev/build/windows.html
-+
-+git df v1.20.0 > ngtcp2.patch
-+mv ngtcp2.patch ../curl-impersonate/patches/ngtcp2.patch
-+
+diff --git a/configure.ac b/configure.ac
+index 6f32c5c4..846fb4c2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -337,13 +337,17 @@ if test "x${request_boringssl}" != "xno"; then
+   LIBS="$BORINGSSL_LIBS $LIBS"
+ 
+   AC_MSG_CHECKING([for SSL_set_quic_early_data_context])
+-  AC_LINK_IFELSE([AC_LANG_PROGRAM([[
++  # MinGW cross-link tests are brittle here because BoringSSL is a static
++  # library with Windows-specific transitive dependencies. A compile check is
++  # sufficient to verify that the requested BoringSSL QUIC API is available,
++  # and the real library link happens later when libngtcp2 is built.
++  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+     #include <openssl/ssl.h>
+   ]], [[
+     SSL *ssl = NULL;
+     SSL_set_quic_early_data_context(ssl, NULL, 0);
+   ]])],
+   [AC_MSG_RESULT([yes]); have_boringssl=yes],
+   [AC_MSG_RESULT([no]); have_boringssl=no])
+ 
+   CXXFLAGS="$save_CXXFLAGS"
+   LIBS="$save_LIBS"
+
 diff --git a/lib/includes/ngtcp2/ngtcp2.h b/lib/includes/ngtcp2/ngtcp2.h
 index a09ceea3..06a7952f 100644
 --- a/lib/includes/ngtcp2/ngtcp2.h

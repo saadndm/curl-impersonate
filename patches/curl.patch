@@ -169,7 +169,27 @@ index bce4bf69e7..cf7b1500b0 100644
 +  libcurl-impersonate.pc:libcurl.pc.in
  ])
  AC_OUTPUT
+
+diff --git a/m4/curl-openssl.m4 b/m4/curl-openssl.m4
+index 341ddd12db..7a60d1e232 100644
+--- a/m4/curl-openssl.m4
++++ b/m4/curl-openssl.m4
+@@ -144,6 +144,15 @@ if test "x$OPT_OPENSSL" != xno; then
+   LDFLAGS="$LDFLAGS $SSL_LDFLAGS"
+   LDFLAGSPC="$LDFLAGSPC $SSL_LDFLAGS"
  
++  case "$host_os" in
++    mingw*)
++      dnl MinGW static BoringSSL probe links need the C++ runtime and Winsock.
++      dnl Without these, AC_CHECK_LIB(crypto, HMAC_Update) and later QUIC
++      dnl symbol probes incorrectly fail even though the symbols are present.
++      LIBS="-lc++ -lc++abi -lunwind -lwinpthread -lws2_32 $LIBS"
++      ;;
++  esac
++
+   AC_CHECK_LIB(crypto, HMAC_Update,[
+     HAVECRYPTO="yes"
+     LIBS="-lcrypto $LIBS"
 diff --git a/curl-config.in b/curl-config.in
 index 31ea30b24a..6534c11666 100644
 --- a/curl-config.in
