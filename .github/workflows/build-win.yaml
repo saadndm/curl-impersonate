@@ -31,7 +31,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - { sys: vcvars64, env: x86_64, runner: windows-latest }
+          # - { sys: vcvars64, env: x86_64, runner: windows-latest }
           - { sys: vcvars32, env: i686, runner: windows-latest }
           - { sys: vcvarsarm64, env: arm64, runner: windows-11-arm }
     runs-on: ${{ matrix.runner }}
@@ -90,3 +90,134 @@ jobs:
         with:
           name: artifacts.windows.${{ matrix.env }}
           path: ./libcurl-impersonate*.tar.gz
+
+  build-windows-mingw:
+    name: Build windows mingw-w64 binaries
+    runs-on: ubuntu-latest
+    container: mstorsjo/llvm-mingw:20260421
+    env:
+      ARCH: x86_64-w64-mingw32  # https://github.com/madler/zlib/issues/683
+      CC: /opt/llvm-mingw/bin/x86_64-w64-mingw32-clang
+      CXX: /opt/llvm-mingw/bin/x86_64-w64-mingw32-clang++
+      LD: /opt/llvm-mingw/bin/x86_64-w64-mingw32-ld
+      STRIP: /opt/llvm-mingw/bin/x86_64-w64-mingw32-strip
+      LIBS: "-lc++ -lc++abi -lunwind -lws2_32"
+      CFLAGS: "-O3"
+      CPPFLAGS: "-I/opt/llvm-mingw/generic-w64-mingw32/include -I/opt/llvm-mingw/x86_64-w64-mingw32/include"
+      CXXFLAGS: "-D_UCRT -std=c++17 -static"
+      LDFLAGS: "-Wl,-lucrt -L/opt/llvm-mingw/x86_64-w64-mingw32/lib --ld-path=/opt/llvm-mingw/bin/x86_64-w64-mingw32-ld -static"
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v2
+
+      - name: Install Windows dependencies
+        run: |
+          apt-get update
+          apt-get -y install golang-go automake cmake autoconf libtool pkg-config curl wget git jq xz-utils grep sed groff gnupg libcunit1-dev libgpg-error-dev mingw-w64-tools nasm
+
+      # Cache the build of BoringSSL, which is the longest part of the build
+      # We must cache the .zip as well, otherwise the Makefile will
+      # rebuild BoringSSL. This whole thing is a bit hacky, but necessary to
+      # reduce the insanely long build times.
+      - name: Cache BoringSSL source
+        uses: actions/cache@v4
+        with:
+          path: boringssl-${{ env.BORINGSSL_COMMIT }}.zip
+          key: ${{ runner.os }}-${{ env.ARCH }}-boring-source-${{ env.BORINGSSL_COMMIT }}
+
+      - name: Cache BoringSSL build
+        id: cache-boringssl
+        uses: actions/cache@v4
+        with:
+          path: boringssl-${{ env.BORINGSSL_COMMIT }}/build
+          key: ${{ runner.os }}-${{ env.ARCH }}-boring-build-${{ env.BORINGSSL_COMMIT }}-${{ hashFiles('patches/boringssl.patch', 'Makefile.in', '.github/workflows/build-win.yaml') }}
+
+      # Trick the Makefile into skipping the BoringSSL build step
+      # if it was found in the cache. See Makefile.in
+      - name: Post BoringSSL cache restore
+        if: ${{ steps.cache-boringssl.outputs.cache-hit != false }}
+        run: |
+          touch boringssl-${{ env.BORINGSSL_COMMIT }}.zip
+          touch boringssl-${{ env.BORINGSSL_COMMIT }}/.patched
+          find boringssl-${{ env.BORINGSSL_COMMIT }}/build -type f | xargs touch
+
+      # Recompile curl-impersonate statically when doing a release.
+      - name: Reconfigure statically
+        run: |
+          set -e
+          mkdir -p "${{ runner.temp }}/install"
+          ./configure --prefix=${{ runner.temp }}/install --enable-static \
+                      --host=${{ env.ARCH }} \
+                      --with-ca-path=/etc/ssl/certs \
+                      --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+
+      - name: Build statically
+        run: |
+          set -e
+          make build
+          make checkbuild
+          make install-strip
+
+      - name: Create tar release files
+        shell: bash
+        run: |
+          release_dir="$GITHUB_WORKSPACE/release-assets"
+          mkdir -p "$release_dir"
+          cp zlib-*/installed/lib/lib*.a ${{ runner.temp }}/install/lib
+          cp zstd-*/installed/lib/lib*.a ${{ runner.temp }}/install/lib
+          cp nghttp2*/installed/lib/lib*.a ${{ runner.temp }}/install/lib
+          cp nghttp3*/installed/lib/lib*.a ${{ runner.temp }}/install/lib
+          cp ngtcp2*/installed/lib/lib*.a ${{ runner.temp }}/install/lib
+          cp brotli*/out/installed/lib/lib*.a ${{ runner.temp }}/install/lib
+          cp boringssl*/lib/lib*.a ${{ runner.temp }}/install/lib
+
+          cd ${{ runner.temp }}/install/lib
+          mv libcurl-impersonate.a libcurl-impersonate.orig.a
+          lib_list="libcurl-impersonate.orig.a libz.a libzstd.a libbrotlidec.a libbrotlicommon.a libbrotlienc.a libnghttp2.a libnghttp3.a libngtcp2.a libngtcp2_crypto_boringssl.a libssl.a libcrypto.a"
+          TARGET_NAME="x86_64-win32"
+
+          rm -rf merge && mkdir merge
+          for lib in $lib_list; do
+            lib_base="${lib%.a}"
+            mkdir -p "merge/$lib_base"
+            cd "merge/$lib_base"
+            /opt/llvm-mingw/bin/llvm-ar x "../../$lib"
+            cd ../..
+          done
+          /opt/llvm-mingw/bin/llvm-ar rcs libcurl-impersonate.a merge/*/*
+
+          rm -rf merge
+          rm -f libz.a libzstd.a libbrotlidec.a libbrotlicommon.a libbrotlienc.a libnghttp2.a libnghttp3.a libngtcp2.a libngtcp2_crypto_boringssl.a libssl.a libcrypto.a
+          rm -f libcurl-impersonate.orig.a
+          ls -lah .
+
+          if [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then
+            tar -c -z -f "$release_dir/libcurl-impersonate-${{ github.ref_name }}.$TARGET_NAME.tar.gz" lib*
+          else
+            tar -c -z -f "$release_dir/libcurl-impersonate.$TARGET_NAME.tar.gz" lib*
+          fi
+
+          cd ${{ runner.temp }}/install/bin
+          if [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then
+            tar -c -z -f "$release_dir/curl-impersonate-${{ github.ref_name }}.$TARGET_NAME.tar.gz" curl-impersonate.exe curl_*
+          else
+            tar -c -z -f "$release_dir/curl-impersonate.$TARGET_NAME.tar.gz" curl-impersonate.exe curl_*
+          fi
+
+      - name: Upload MinGW configure logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mingw-config-logs
+          path: |
+            curl-8_15_0/config.log
+            curl-8_15_0/config.status
+            ngtcp2-*/config.log
+            ngtcp2-*/config.status
+          if-no-files-found: warn
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts.windows.x86_64-win32
+          path: ./release-assets/*curl-impersonate*.tar.gz

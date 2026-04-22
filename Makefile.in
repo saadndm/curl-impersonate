@@ -60,6 +60,8 @@ cc_compiler := $(firstword $(cc_words))
 cxx_compiler := $(firstword $(cxx_words))
 cc_extra_flags := $(filter -%,$(wordlist 2,$(words $(cc_words)),$(cc_words)))
 cxx_extra_flags := $(filter -%,$(wordlist 2,$(words $(cxx_words)),$(cxx_words)))
+winpthread_static_lib := $(strip $(shell $(cc_compiler) --print-file-name=libwinpthread.a 2>/dev/null))
+mingw_runtime_libs := -lc++ -lc++abi -lunwind $(if $(filter /%,$(winpthread_static_lib)),$(winpthread_static_lib),-lwinpthread) -lws2_32
 
 # https://github.com/google/brotli/commit/641bec0e30bea648b3da1cd90fc6b44deb429f71
 brotli_install_dir := $(abspath brotli-$(BROTLI_VERSION)/out/installed)
@@ -137,7 +139,11 @@ install-strip: ## Like 'install', but strip binaries for smaller size
 	cp -R include/curl "$(DESTDIR)@includedir@"
 	# We could have used 'install-strip' but then the docs would be installed as well.
 	# Instead strip manually.
-	$(STRIP) "$(DESTDIR)@bindir@/curl-impersonate"
+	if test -f "$(DESTDIR)@bindir@/curl-impersonate.exe"; then \
+		$(STRIP) "$(DESTDIR)@bindir@/curl-impersonate.exe"; \
+	else \
+		$(STRIP) "$(DESTDIR)@bindir@/curl-impersonate"; \
+	fi
 	# Wrapper scripts for the cli shortcut (e.g. 'curl_chrome99')
 	install $(srcdir)/bin/curl_* "$(DESTDIR)@bindir@"
 .PHONY: install-strip
@@ -265,6 +271,9 @@ $(boringssl_static_libs): boringssl-$(BORING_SSL_COMMIT).zip boringssl-$(BORING_
 		linux*)                 \
 			system_name=Linux   \
 			;;                  \
+		mingw*)                 \
+			system_name=Windows \
+			;;                  \
 		ios*)                   \
 			system_name=iOS     \
 			;;                  \
@@ -364,9 +373,28 @@ $(ngtcp2_static_libs): ngtcp2-$(NGTCP2_VERSION).tar.bz2 ngtcp2-$(NGTCP2_VERSION)
 		fi; \
 	}
 
-	./configure PKG_CONFIG_PATH=$(nghttp3_install_dir)/lib/pkgconfig \
-		BORINGSSL_LIBS="-L$(boringssl_install_dir)/ssl -lssl -L$(boringssl_install_dir)/crypto -lcrypto -pthread" \
-		BORINGSSL_CFLAGS="-I$(boringssl_dir)/include" \
+	case $(host_os) in          \
+		mingw*)                 \
+			export LIBS="$(mingw_runtime_libs)"; \
+			;;                  \
+		*)                      \
+			;;                  \
+	esac
+
+	{ \
+		openssl_libs="-L$(boringssl_install_dir)/ssl -lssl -L$(boringssl_install_dir)/crypto -lcrypto"; \
+		case "$(host_os)" in \
+			mingw*) openssl_libs="$$openssl_libs $(mingw_runtime_libs)" ;; \
+			*) openssl_libs="$$openssl_libs -pthread" ;; \
+		esac; \
+	}
+
+	PKG_CONFIG_PATH="$(nghttp3_install_dir)/lib/pkgconfig" \
+	OPENSSL_LIBS="$$openssl_libs" \
+	OPENSSL_CFLAGS="-I$(boringssl_dir)/include" \
+	BORINGSSL_LIBS="$$openssl_libs" \
+	BORINGSSL_CFLAGS="-I$(boringssl_dir)/include" \
+		./configure \
 		--with-boringssl \
 		$$config_flags
 	$(MAKE) MAKEFLAGS=-j$(SUBJOBS)
@@ -468,6 +496,9 @@ $(CURL_VERSION)/.chrome: $(chrome_libs)	$(CURL_VERSION).tar.gz $(CURL_VERSION)/.
 	  config_flags="$$config_flags --with-ngtcp2=$(ngtcp2_install_dir)"; \
 	  config_flags="$$config_flags --with-nghttp3=$(nghttp3_install_dir)"; \
 	  case "$(host_os)" in \
+	    mingw*) \
+	      config_flags="$$config_flags --without-libidn2"; \
+	      ;; \
 	    darwin*|ios*|tvos*|watchos*) \
 	      config_flags="$$config_flags --with-apple-idn --without-libidn2"; \
 	      ;; \
@@ -502,9 +533,10 @@ $(CURL_VERSION)/.chrome: $(chrome_libs)	$(CURL_VERSION).tar.gz $(CURL_VERSION)/.
 		config_flags="$$config_flags --with-ca-path=$(with_ca_path)"; \
 	  fi; \
 	  case "$(host_os)" in \
-	    darwin*|ios*|tvos*|watchos*) add_libs="-pthread -lc++" ;; \
-	    *android*) add_libs="-pthread -lc++" ;; \
-	    *) add_libs="-pthread -lstdc++ -L$(libunistring_install_dir)/lib -lunistring" ;; \
+	    mingw*) add_libs="$(mingw_runtime_libs) $$LIBS"; add_ldflags="$$LDFLAGS" ;; \
+	    darwin*|ios*|tvos*|watchos*) add_libs="-pthread -lc++"; add_ldflags="$$LDFLAGS -Wl,-rpath,$(ngtcp2_install_dir)/lib -pthread" ;; \
+	    *android*) add_libs="-pthread -lc++"; add_ldflags="$$LDFLAGS -pthread" ;; \
+	    *) add_libs="-pthread -lstdc++ -L$(libunistring_install_dir)/lib -lunistring"; add_ldflags="$$LDFLAGS -Wl,-rpath,$(ngtcp2_install_dir)/lib -pthread" ;; \
 	  esac; \
 	}
 
@@ -523,10 +555,13 @@ $(CURL_VERSION)/.chrome: $(chrome_libs)	$(CURL_VERSION).tar.gz $(CURL_VERSION)/.
 	DYLD_LIBRARY_PATH="$$lib_path" \
 	LD_LIBRARY_PATH="$$lib_path" \
 	PKG_CONFIG_LIBDIR= \
-	PKG_CONFIG_PATH="$(ngtcp2_install_dir)/lib/pkgconfig" \
+		CXXFLAGS="$$CXXFLAGS -pthread" \
+		LDFLAGS="$$add_ldflags" \
+		CPPFLAGS="$$CPPFLAGS -DCURL_STATICLIB -DNGHTTP2_STATICLIB -DNGTCP2_STATICLIB -DNGHTTP3_STATICLIB" \
+		LIBS="$$add_libs" \
+		PKG_CONFIG_PATH="$(ngtcp2_install_dir)/crypto/boringssl:$(ngtcp2_install_dir)/lib/pkgconfig" \
 		./configure \
-			 $$config_flags \
-			 LIBS="$$add_libs"
+			 $$config_flags
 
 	# Remove possible leftovers from a previous compilation
 	$(MAKE) clean MAKEFLAGS=
